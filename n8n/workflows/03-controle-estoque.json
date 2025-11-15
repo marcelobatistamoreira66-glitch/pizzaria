@@ -1,0 +1,430 @@
+{
+  "name": "📊 Controle de Estoque",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 */4 * * *"
+            }
+          ]
+        }
+      },
+      "id": "trigger-verificacao",
+      "name": "Trigger - A cada 4 horas",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  p.id,\n  p.nome,\n  p.estoque_atual,\n  p.estoque_minimo,\n  c.nome as categoria\nFROM produtos p\nJOIN categorias c ON c.id = p.categoria_id\nWHERE p.estoque_atual <= p.estoque_minimo\n  AND p.disponivel = true\nORDER BY (p.estoque_minimo - p.estoque_atual) DESC",
+        "options": {}
+      },
+      "id": "verificar-estoque-baixo",
+      "name": "Verificar Estoque Baixo",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [460, 300],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{$json.length}}",
+              "operation": "larger",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "id": "tem-produtos-baixos",
+      "name": "Tem Produtos com Estoque Baixo?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const produtos = $input.all();\n\nlet mensagem = '⚠️ *ALERTA DE ESTOQUE BAIXO*\\n\\n';\nmensagem += `${produtos.length} produto(s) com estoque baixo:\\n\\n`;\n\nprodutos.forEach((item, idx) => {\n  const produto = item.json;\n  mensagem += `${idx + 1}. *${produto.nome}*\\n`;\n  mensagem += `   Categoria: ${produto.categoria}\\n`;\n  mensagem += `   Atual: ${produto.estoque_atual} | Mínimo: ${produto.estoque_minimo}\\n`;\n  mensagem += `   ⚠️ Faltam: ${produto.estoque_minimo - produto.estoque_atual} unidades\\n\\n`;\n});\n\nmensagem += '🔔 Providencie a reposição!';\n\nreturn {\n  json: {\n    mensagem: mensagem,\n    produtos_baixos: produtos.map(p => p.json)\n  }\n};"
+      },
+      "id": "formatar-alerta",
+      "name": "Formatar Alerta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 200]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.EVOLUTION_API_URL}}/message/sendText/{{$env.EVOLUTION_INSTANCE_NAME}}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "number",
+              "value": "={{$env.PIZZARIA_TELEFONE}}"
+            },
+            {
+              "name": "text",
+              "value": "={{$json.mensagem}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "enviar-alerta-gestor",
+      "name": "Enviar Alerta para Gestor",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1120, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "3",
+          "name": "Evolution API Header"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "atualizar-estoque",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-atualizar-estoque",
+      "name": "Webhook Atualizar Estoque",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 600],
+      "webhookId": "webhook-atualizar-estoque"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT estoque_atual FROM produtos WHERE id = {{$json.produto_id}}",
+        "options": {}
+      },
+      "id": "buscar-estoque-atual",
+      "name": "Buscar Estoque Atual",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [460, 600],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const dadosAtualizacao = $('Webhook Atualizar Estoque').first().json;\nconst estoqueAtual = $json.estoque_atual;\n\nlet novoEstoque;\nconst tipo = dadosAtualizacao.tipo; // entrada, saida, ajuste\nconst quantidade = parseInt(dadosAtualizacao.quantidade);\n\nswitch(tipo) {\n  case 'entrada':\n    novoEstoque = estoqueAtual + quantidade;\n    break;\n  case 'saida':\n    novoEstoque = estoqueAtual - quantidade;\n    break;\n  case 'ajuste':\n    novoEstoque = quantidade; // ajuste define o valor absoluto\n    break;\n  default:\n    throw new Error('Tipo de movimentação inválido');\n}\n\nif (novoEstoque < 0) {\n  throw new Error('Estoque não pode ser negativo');\n}\n\nreturn {\n  json: {\n    produto_id: dadosAtualizacao.produto_id,\n    tipo: tipo,\n    quantidade: quantidade,\n    quantidade_anterior: estoqueAtual,\n    quantidade_atual: novoEstoque,\n    motivo: dadosAtualizacao.motivo || '',\n    observacoes: dadosAtualizacao.observacoes || '',\n    usuario: dadosAtualizacao.usuario || 'sistema'\n  }\n};"
+      },
+      "id": "calcular-novo-estoque",
+      "name": "Calcular Novo Estoque",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 600]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE produtos \nSET estoque_atual = {{$json.quantidade_atual}},\n    updated_at = CURRENT_TIMESTAMP\nWHERE id = {{$json.produto_id}}",
+        "options": {}
+      },
+      "id": "atualizar-estoque-produto",
+      "name": "Atualizar Estoque Produto",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [900, 600],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "estoque_movimentacoes",
+        "columns": "produto_id, tipo, quantidade, quantidade_anterior, quantidade_atual, motivo, observacoes, usuario",
+        "values": "={{$('Calcular Novo Estoque').first().json.produto_id}}, {{$('Calcular Novo Estoque').first().json.tipo}}, {{$('Calcular Novo Estoque').first().json.quantidade}}, {{$('Calcular Novo Estoque').first().json.quantidade_anterior}}, {{$('Calcular Novo Estoque').first().json.quantidade_atual}}, {{$('Calcular Novo Estoque').first().json.motivo}}, {{$('Calcular Novo Estoque').first().json.observacoes}}, {{$('Calcular Novo Estoque').first().json.usuario}}",
+        "options": {}
+      },
+      "id": "registrar-movimentacao",
+      "name": "Registrar Movimentação",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1120, 600],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"success\": true, \"estoque_anterior\": $('Calcular Novo Estoque').first().json.quantidade_anterior, \"estoque_atual\": $('Calcular Novo Estoque').first().json.quantidade_atual } }}",
+        "options": {}
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1340, 600]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "baixa-estoque-pedido",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-baixa-pedido",
+      "name": "Webhook Baixa por Pedido",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 900],
+      "webhookId": "webhook-baixa-pedido"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT pi.produto_id, pi.quantidade, p.nome\nFROM pedido_itens pi\nJOIN produtos p ON p.id = pi.produto_id\nWHERE pi.pedido_id = {{$json.pedido_id}}",
+        "options": {}
+      },
+      "id": "buscar-itens-pedido",
+      "name": "Buscar Itens do Pedido",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [460, 900],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE produtos \nSET estoque_atual = estoque_atual - {{$json.quantidade}},\n    updated_at = CURRENT_TIMESTAMP\nWHERE id = {{$json.produto_id}}\nRETURNING id, nome, estoque_atual",
+        "options": {}
+      },
+      "id": "dar-baixa-estoque",
+      "name": "Dar Baixa no Estoque",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [680, 900],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "estoque_movimentacoes",
+        "columns": "produto_id, tipo, quantidade, motivo, usuario",
+        "values": "={{$json.id}}, saida, {{$('Buscar Itens do Pedido').item.json.quantidade}}, Venda - Pedido #{{$('Webhook Baixa por Pedido').first().json.pedido_id}}, sistema",
+        "options": {}
+      },
+      "id": "registrar-movimentacao-pedido",
+      "name": "Registrar Movimentação Pedido",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [900, 900],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"success\": true, \"itens_processados\": $input.all().length } }}",
+        "options": {}
+      },
+      "id": "webhook-response-pedido",
+      "name": "Webhook Response Pedido",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1120, 900]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Trigger - A cada 4 horas": {
+      "main": [
+        [
+          {
+            "node": "Verificar Estoque Baixo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verificar Estoque Baixo": {
+      "main": [
+        [
+          {
+            "node": "Tem Produtos com Estoque Baixo?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tem Produtos com Estoque Baixo?": {
+      "main": [
+        [
+          {
+            "node": "Formatar Alerta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatar Alerta": {
+      "main": [
+        [
+          {
+            "node": "Enviar Alerta para Gestor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Atualizar Estoque": {
+      "main": [
+        [
+          {
+            "node": "Buscar Estoque Atual",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Estoque Atual": {
+      "main": [
+        [
+          {
+            "node": "Calcular Novo Estoque",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calcular Novo Estoque": {
+      "main": [
+        [
+          {
+            "node": "Atualizar Estoque Produto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Atualizar Estoque Produto": {
+      "main": [
+        [
+          {
+            "node": "Registrar Movimentação",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar Movimentação": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Baixa por Pedido": {
+      "main": [
+        [
+          {
+            "node": "Buscar Itens do Pedido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Itens do Pedido": {
+      "main": [
+        [
+          {
+            "node": "Dar Baixa no Estoque",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dar Baixa no Estoque": {
+      "main": [
+        [
+          {
+            "node": "Registrar Movimentação Pedido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar Movimentação Pedido": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response Pedido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "3",
+  "id": "3",
+  "meta": {
+    "instanceId": "pizzaria"
+  },
+  "tags": []
+}

@@ -1,0 +1,440 @@
+{
+  "name": "🔔 Notificações Inteligentes",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/10 * * * *"
+            }
+          ]
+        }
+      },
+      "id": "trigger-verificacao-pedidos",
+      "name": "Trigger - A cada 10 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  p.*,\n  c.telefone,\n  c.nome as cliente_nome,\n  EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - p.updated_at))/60 as minutos_ultima_atualizacao\nFROM pedidos p\nJOIN clientes c ON c.id = p.cliente_id\nWHERE p.status IN ('confirmado', 'preparando', 'saiu_entrega')\n  AND EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - p.updated_at))/60 > 30\nORDER BY p.created_at",
+        "options": {}
+      },
+      "id": "buscar-pedidos-sem-atualizacao",
+      "name": "Buscar Pedidos sem Atualização",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [460, 300],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{$json.length}}",
+              "operation": "larger",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "id": "tem-pedidos-parados",
+      "name": "Tem Pedidos Parados?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const pedidos = $input.all();\n\nlet mensagemGestor = '⚠️ *ALERTA - PEDIDOS SEM ATUALIZAÇÃO*\\n\\n';\nmensagemGestor += `${pedidos.length} pedido(s) há mais de 30 minutos sem atualização:\\n\\n`;\n\npedidos.forEach((item, idx) => {\n  const pedido = item.json;\n  const minutos = Math.floor(pedido.minutos_ultima_atualizacao);\n  mensagemGestor += `${idx + 1}. Pedido: *${pedido.numero_pedido}*\\n`;\n  mensagemGestor += `   Cliente: ${pedido.cliente_nome}\\n`;\n  mensagemGestor += `   Status: ${pedido.status}\\n`;\n  mensagemGestor += `   ⏱️ Sem atualização há: ${minutos} minutos\\n\\n`;\n});\n\nmensagemGestor += '🔔 Verifique esses pedidos!';\n\nreturn {\n  json: {\n    mensagem_gestor: mensagemGestor,\n    pedidos: pedidos.map(p => p.json)\n  }\n};"
+      },
+      "id": "formatar-alerta-gestor",
+      "name": "Formatar Alerta Gestor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.EVOLUTION_API_URL}}/message/sendText/{{$env.EVOLUTION_INSTANCE_NAME}}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "number",
+              "value": "={{$env.PIZZARIA_TELEFONE}}"
+            },
+            {
+              "name": "text",
+              "value": "={{$json.mensagem_gestor}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "enviar-alerta-gestor-pedidos",
+      "name": "Enviar Alerta Gestor",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1120, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "3",
+          "name": "Evolution API Header"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * *"
+            }
+          ]
+        }
+      },
+      "id": "trigger-relatorio-diario",
+      "name": "Trigger - 9h diariamente",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 600]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  COUNT(*) as total_pedidos,\n  SUM(CASE WHEN status = 'entregue' THEN 1 ELSE 0 END) as pedidos_entregues,\n  SUM(CASE WHEN status = 'cancelado' THEN 1 ELSE 0 END) as pedidos_cancelados,\n  SUM(CASE WHEN status IN ('novo', 'confirmado', 'preparando', 'saiu_entrega') THEN 1 ELSE 0 END) as pedidos_em_andamento,\n  COALESCE(SUM(CASE WHEN status = 'entregue' THEN total ELSE 0 END), 0) as faturamento_dia,\n  COALESCE(AVG(CASE WHEN status = 'entregue' THEN total ELSE NULL END), 0) as ticket_medio\nFROM pedidos\nWHERE DATE(created_at) = CURRENT_DATE - INTERVAL '1 day'",
+        "options": {}
+      },
+      "id": "calcular-metricas-dia",
+      "name": "Calcular Métricas do Dia Anterior",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [460, 600],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  pr.nome,\n  COUNT(pi.id) as quantidade_vendida,\n  SUM(pi.subtotal) as faturamento_produto\nFROM pedido_itens pi\nJOIN produtos pr ON pr.id = pi.produto_id\nJOIN pedidos p ON p.id = pi.pedido_id\nWHERE DATE(p.created_at) = CURRENT_DATE - INTERVAL '1 day'\n  AND p.status = 'entregue'\nGROUP BY pr.id, pr.nome\nORDER BY quantidade_vendida DESC\nLIMIT 5",
+        "options": {}
+      },
+      "id": "produtos-mais-vendidos",
+      "name": "Top 5 Produtos Mais Vendidos",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [460, 780],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const metricas = $input.first().json;\nconst topProdutos = $input.last().json;\n\nconst dataOntem = new Date();\ndataOntem.setDate(dataOntem.getDate() - 1);\nconst dataFormatada = dataOntem.toLocaleDateString('pt-BR');\n\nlet relatorio = `📊 *RELATÓRIO DIÁRIO - ${dataFormatada}*\\n\\n`;\n\nrelatorio += `📈 *RESUMO GERAL*\\n`;\nrelatorio += `Total de Pedidos: ${metricas.total_pedidos}\\n`;\nrelatorio += `✅ Entregues: ${metricas.pedidos_entregues}\\n`;\nrelatorio += `❌ Cancelados: ${metricas.pedidos_cancelados}\\n`;\nrelatorio += `⏳ Em Andamento: ${metricas.pedidos_em_andamento}\\n\\n`;\n\nrelatorio += `💰 *FINANCEIRO*\\n`;\nrelatorio += `Faturamento: R$ ${parseFloat(metricas.faturamento_dia).toFixed(2)}\\n`;\nrelatorio += `Ticket Médio: R$ ${parseFloat(metricas.ticket_medio).toFixed(2)}\\n\\n`;\n\nif (topProdutos && topProdutos.length > 0) {\n  relatorio += `🏆 *TOP 5 PRODUTOS*\\n`;\n  topProdutos.forEach((produto, idx) => {\n    relatorio += `${idx + 1}. ${produto.nome} - ${produto.quantidade_vendida} vendas (R$ ${parseFloat(produto.faturamento_produto).toFixed(2)})\\n`;\n  });\n}\n\nrelatorio += `\\n---\\nRelatório gerado automaticamente às ${new Date().toLocaleTimeString('pt-BR')}`;\n\nreturn {\n  json: {\n    mensagem: relatorio,\n    metricas: metricas,\n    top_produtos: topProdutos\n  }\n};"
+      },
+      "id": "formatar-relatorio",
+      "name": "Formatar Relatório",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 690]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.EVOLUTION_API_URL}}/message/sendText/{{$env.EVOLUTION_INSTANCE_NAME}}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "number",
+              "value": "={{$env.PIZZARIA_TELEFONE}}"
+            },
+            {
+              "name": "text",
+              "value": "={{$json.mensagem}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "enviar-relatorio",
+      "name": "Enviar Relatório",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [900, 690],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "3",
+          "name": "Evolution API Header"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 20 * * *"
+            }
+          ]
+        }
+      },
+      "id": "trigger-lembrete-avaliacoes",
+      "name": "Trigger - 20h diariamente",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 1000]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  p.id,\n  p.numero_pedido,\n  c.telefone,\n  c.nome as cliente_nome,\n  p.total,\n  p.entregue_em\nFROM pedidos p\nJOIN clientes c ON c.id = p.cliente_id\nWHERE p.status = 'entregue'\n  AND DATE(p.entregue_em) = CURRENT_DATE\n  AND p.avaliacao IS NULL\nORDER BY p.entregue_em DESC",
+        "options": {}
+      },
+      "id": "buscar-pedidos-sem-avaliacao",
+      "name": "Buscar Pedidos sem Avaliação",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [460, 1000],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{$json.length}}",
+              "operation": "larger",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "id": "tem-pedidos-avaliar",
+      "name": "Tem Pedidos para Avaliar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 1000]
+    },
+    {
+      "parameters": {
+        "jsCode": "const pedido = $json;\n\nconst mensagem = `Olá ${pedido.cliente_nome}! 😊\\n\\nEsperamos que tenha gostado da sua pizza! 🍕\\n\\nPedido: *${pedido.numero_pedido}*\\n\\nPor favor, avalie nosso atendimento:\\n\\n⭐⭐⭐⭐⭐ Excelente\\n⭐⭐⭐⭐ Bom\\n⭐⭐⭐ Regular\\n⭐⭐ Ruim\\n⭐ Muito Ruim\\n\\nSua opinião é muito importante para nós!`;\n\nreturn {\n  json: {\n    telefone: pedido.telefone,\n    mensagem: mensagem,\n    pedido_id: pedido.id,\n    numero_pedido: pedido.numero_pedido\n  }\n};"
+      },
+      "id": "formatar-pedido-avaliacao",
+      "name": "Formatar Pedido de Avaliação",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 1000]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.EVOLUTION_API_URL}}/message/sendText/{{$env.EVOLUTION_INSTANCE_NAME}}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "number",
+              "value": "={{$json.telefone}}"
+            },
+            {
+              "name": "text",
+              "value": "={{$json.mensagem}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "enviar-pedido-avaliacao",
+      "name": "Enviar Pedido de Avaliação",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1120, 1000],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "3",
+          "name": "Evolution API Header"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Trigger - A cada 10 min": {
+      "main": [
+        [
+          {
+            "node": "Buscar Pedidos sem Atualização",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Pedidos sem Atualização": {
+      "main": [
+        [
+          {
+            "node": "Tem Pedidos Parados?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tem Pedidos Parados?": {
+      "main": [
+        [
+          {
+            "node": "Formatar Alerta Gestor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatar Alerta Gestor": {
+      "main": [
+        [
+          {
+            "node": "Enviar Alerta Gestor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger - 9h diariamente": {
+      "main": [
+        [
+          {
+            "node": "Calcular Métricas do Dia Anterior",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Top 5 Produtos Mais Vendidos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calcular Métricas do Dia Anterior": {
+      "main": [
+        [
+          {
+            "node": "Formatar Relatório",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Top 5 Produtos Mais Vendidos": {
+      "main": [
+        [
+          {
+            "node": "Formatar Relatório",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatar Relatório": {
+      "main": [
+        [
+          {
+            "node": "Enviar Relatório",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger - 20h diariamente": {
+      "main": [
+        [
+          {
+            "node": "Buscar Pedidos sem Avaliação",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Pedidos sem Avaliação": {
+      "main": [
+        [
+          {
+            "node": "Tem Pedidos para Avaliar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tem Pedidos para Avaliar?": {
+      "main": [
+        [
+          {
+            "node": "Formatar Pedido de Avaliação",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatar Pedido de Avaliação": {
+      "main": [
+        [
+          {
+            "node": "Enviar Pedido de Avaliação",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "4",
+  "id": "4",
+  "meta": {
+    "instanceId": "pizzaria"
+  },
+  "tags": []
+}

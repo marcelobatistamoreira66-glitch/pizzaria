@@ -1,0 +1,413 @@
+{
+  "name": "📦 Gestão de Pedidos",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "criar-pedido",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-criar-pedido",
+      "name": "Webhook Criar Pedido",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "webhook-criar-pedido"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Gerar número único de pedido\nconst agora = new Date();\nconst timestamp = agora.getTime();\nconst random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');\nconst numeroPedido = `PED${agora.getFullYear()}${(agora.getMonth()+1).toString().padStart(2,'0')}${agora.getDate().toString().padStart(2,'0')}-${random}`;\n\nconst dadosPedido = $json;\n\n// Validar dados obrigatórios\nif (!dadosPedido.cliente_id) {\n  throw new Error('cliente_id é obrigatório');\n}\n\nif (!dadosPedido.itens || dadosPedido.itens.length === 0) {\n  throw new Error('Pedido deve ter pelo menos um item');\n}\n\n// Calcular valores\nlet subtotal = 0;\ndadosPedido.itens.forEach(item => {\n  const itemSubtotal = item.preco_unitario * item.quantidade;\n  item.subtotal = itemSubtotal;\n  subtotal += itemSubtotal;\n});\n\nconst taxaEntrega = dadosPedido.tipo === 'delivery' ? parseFloat(dadosPedido.taxa_entrega || 5.00) : 0;\nconst desconto = parseFloat(dadosPedido.desconto || 0);\nconst total = subtotal + taxaEntrega - desconto;\n\n// Calcular tempo estimado (baseado no item com maior tempo de preparo)\nlet tempoEstimado = 0;\nif (dadosPedido.tipo === 'delivery') {\n  tempoEstimado = 40; // tempo padrão de entrega\n} else {\n  tempoEstimado = 30; // tempo padrão de retirada\n}\n\nconst previsaoEntrega = new Date(agora.getTime() + tempoEstimado * 60000);\n\nreturn {\n  json: {\n    numero_pedido: numeroPedido,\n    cliente_id: dadosPedido.cliente_id,\n    tipo: dadosPedido.tipo || 'delivery',\n    subtotal: subtotal.toFixed(2),\n    taxa_entrega: taxaEntrega.toFixed(2),\n    desconto: desconto.toFixed(2),\n    total: total.toFixed(2),\n    forma_pagamento: dadosPedido.forma_pagamento || 'dinheiro',\n    troco_para: dadosPedido.troco_para || null,\n    observacoes: dadosPedido.observacoes || null,\n    tempo_estimado: tempoEstimado,\n    previsao_entrega: previsaoEntrega.toISOString(),\n    status: 'novo',\n    itens: dadosPedido.itens\n  }\n};"
+      },
+      "id": "processar-pedido",
+      "name": "Processar Dados do Pedido",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "pedidos",
+        "columns": "numero_pedido, cliente_id, status, tipo, subtotal, taxa_entrega, desconto, total, forma_pagamento, troco_para, observacoes, tempo_estimado, previsao_entrega",
+        "values": "={{$json.numero_pedido}}, {{$json.cliente_id}}, {{$json.status}}, {{$json.tipo}}, {{$json.subtotal}}, {{$json.taxa_entrega}}, {{$json.desconto}}, {{$json.total}}, {{$json.forma_pagamento}}, {{$json.troco_para}}, {{$json.observacoes}}, {{$json.tempo_estimado}}, {{$json.previsao_entrega}}",
+        "options": {
+          "returnFields": "*"
+        }
+      },
+      "id": "inserir-pedido",
+      "name": "Inserir Pedido",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [680, 300],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Preparar itens para inserção\nconst pedidoId = $json.id;\nconst itens = $('Processar Dados do Pedido').first().json.itens;\n\nreturn itens.map(item => ({\n  json: {\n    pedido_id: pedidoId,\n    produto_id: item.produto_id,\n    quantidade: item.quantidade,\n    tamanho: item.tamanho || null,\n    preco_unitario: item.preco_unitario,\n    subtotal: item.subtotal,\n    observacoes: item.observacoes || null,\n    adicionais: item.adicionais || null,\n    remocoes: item.remocoes || null\n  }\n}));"
+      },
+      "id": "preparar-itens",
+      "name": "Preparar Itens",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "pedido_itens",
+        "columns": "pedido_id, produto_id, quantidade, tamanho, preco_unitario, subtotal, observacoes, adicionais, remocoes",
+        "values": "={{$json.pedido_id}}, {{$json.produto_id}}, {{$json.quantidade}}, {{$json.tamanho}}, {{$json.preco_unitario}}, {{$json.subtotal}}, {{$json.observacoes}}, {{$json.adicionais}}, {{$json.remocoes}}",
+        "options": {}
+      },
+      "id": "inserir-itens",
+      "name": "Inserir Itens do Pedido",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1120, 300],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  p.*,\n  c.nome as cliente_nome,\n  c.telefone as cliente_telefone,\n  c.endereco as cliente_endereco,\n  json_agg(\n    json_build_object(\n      'produto_id', pi.produto_id,\n      'nome_produto', pr.nome,\n      'quantidade', pi.quantidade,\n      'tamanho', pi.tamanho,\n      'preco_unitario', pi.preco_unitario,\n      'subtotal', pi.subtotal,\n      'observacoes', pi.observacoes\n    )\n  ) as itens\nFROM pedidos p\nJOIN clientes c ON c.id = p.cliente_id\nJOIN pedido_itens pi ON pi.pedido_id = p.id\nJOIN produtos pr ON pr.id = pi.produto_id\nWHERE p.id = {{$('Inserir Pedido').first().json.id}}\nGROUP BY p.id, c.nome, c.telefone, c.endereco",
+        "options": {}
+      },
+      "id": "buscar-pedido-completo",
+      "name": "Buscar Pedido Completo",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1340, 300],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Formatar mensagem de confirmação do pedido\nconst pedido = $json;\n\nlet mensagem = `✅ *PEDIDO CONFIRMADO*\\n\\n`;\nmensagem += `📋 *Número:* ${pedido.numero_pedido}\\n`;\nmensagem += `👤 *Cliente:* ${pedido.cliente_nome}\\n\\n`;\n\nmensagem += `🍕 *Itens do Pedido:*\\n`;\npedido.itens.forEach((item, idx) => {\n  mensagem += `${idx + 1}. ${item.nome_produto}`;\n  if (item.tamanho) mensagem += ` (${item.tamanho})`;\n  mensagem += ` x${item.quantidade} - R$ ${parseFloat(item.subtotal).toFixed(2)}\\n`;\n  if (item.observacoes) mensagem += `   _${item.observacoes}_\\n`;\n});\n\nmensagem += `\\n💰 *Valores:*\\n`;\nmensagem += `Subtotal: R$ ${parseFloat(pedido.subtotal).toFixed(2)}\\n`;\nif (parseFloat(pedido.taxa_entrega) > 0) {\n  mensagem += `Taxa de Entrega: R$ ${parseFloat(pedido.taxa_entrega).toFixed(2)}\\n`;\n}\nif (parseFloat(pedido.desconto) > 0) {\n  mensagem += `Desconto: -R$ ${parseFloat(pedido.desconto).toFixed(2)}\\n`;\n}\nmensagem += `*Total: R$ ${parseFloat(pedido.total).toFixed(2)}*\\n\\n`;\n\nmensagem += `💳 *Pagamento:* ${pedido.forma_pagamento}\\n`;\nif (pedido.troco_para) {\n  mensagem += `💵 Troco para: R$ ${parseFloat(pedido.troco_para).toFixed(2)}\\n`;\n}\n\nmensagem += `\\n`;\nif (pedido.tipo === 'delivery') {\n  mensagem += `🛵 *Entrega:* ${pedido.tempo_estimado} minutos\\n`;\n  mensagem += `📍 *Endereço:* ${pedido.cliente_endereco}\\n`;\n} else if (pedido.tipo === 'retirada') {\n  mensagem += `🏪 *Retirada:* ${pedido.tempo_estimado} minutos\\n`;\n}\n\nif (pedido.observacoes) {\n  mensagem += `\\n📝 *Observações:* ${pedido.observacoes}\\n`;\n}\n\nmensagem += `\\nObrigado pela preferência! 🍕❤️`;\n\nreturn {\n  json: {\n    pedido_id: pedido.id,\n    numero_pedido: pedido.numero_pedido,\n    telefone: pedido.cliente_telefone,\n    mensagem_confirmacao: mensagem,\n    pedido_completo: pedido\n  }\n};"
+      },
+      "id": "formatar-mensagem",
+      "name": "Formatar Mensagem Confirmação",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.EVOLUTION_API_URL}}/message/sendText/{{$env.EVOLUTION_INSTANCE_NAME}}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "number",
+              "value": "={{$json.telefone}}"
+            },
+            {
+              "name": "text",
+              "value": "={{$json.mensagem_confirmacao}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "enviar-confirmacao",
+      "name": "Enviar Confirmação WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1780, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "3",
+          "name": "Evolution API Header"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{$('Formatar Mensagem Confirmação').first().json}}",
+        "options": {}
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2000, 300]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "atualizar-status-pedido",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-atualizar-status",
+      "name": "Webhook Atualizar Status",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 600],
+      "webhookId": "webhook-atualizar-status"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE pedidos \nSET status = '{{$json.novo_status}}',\n    updated_at = CURRENT_TIMESTAMP,\n    entregue_em = CASE WHEN '{{$json.novo_status}}' = 'entregue' THEN CURRENT_TIMESTAMP ELSE entregue_em END,\n    cancelado_em = CASE WHEN '{{$json.novo_status}}' = 'cancelado' THEN CURRENT_TIMESTAMP ELSE cancelado_em END,\n    motivo_cancelamento = COALESCE('{{$json.motivo_cancelamento}}', motivo_cancelamento)\nWHERE numero_pedido = '{{$json.numero_pedido}}'\nRETURNING *",
+        "options": {}
+      },
+      "id": "atualizar-status",
+      "name": "Atualizar Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [460, 600],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT p.*, c.telefone, c.nome as cliente_nome\nFROM pedidos p\nJOIN clientes c ON c.id = p.cliente_id\nWHERE p.numero_pedido = '{{$json.numero_pedido}}'",
+        "options": {}
+      },
+      "id": "buscar-dados-cliente",
+      "name": "Buscar Dados Cliente",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [680, 600],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const pedido = $json;\n\nconst mensagensStatus = {\n  'confirmado': `✅ Seu pedido *${pedido.numero_pedido}* foi confirmado!\\n\\nEstamos preparando com carinho. Tempo estimado: ${pedido.tempo_estimado} minutos.`,\n  'preparando': `👨‍🍳 Seu pedido *${pedido.numero_pedido}* está sendo preparado!\\n\\nEm breve estará pronto. 🍕`,\n  'saiu_entrega': `🛵 Seu pedido *${pedido.numero_pedido}* saiu para entrega!\\n\\nChega em breve. Bom apetite! 😋`,\n  'entregue': `✅ Pedido *${pedido.numero_pedido}* entregue!\\n\\nObrigado pela preferência! Avalie seu pedido: [link avaliação]`,\n  'cancelado': `❌ Pedido *${pedido.numero_pedido}* cancelado.\\n\\n${pedido.motivo_cancelamento ? 'Motivo: ' + pedido.motivo_cancelamento : 'Entre em contato para mais informações.'}`\n};\n\nconst mensagem = mensagensStatus[pedido.status] || `Status do pedido ${pedido.numero_pedido} atualizado para: ${pedido.status}`;\n\nreturn {\n  json: {\n    telefone: pedido.telefone,\n    mensagem: mensagem,\n    pedido_numero: pedido.numero_pedido,\n    status: pedido.status\n  }\n};"
+      },
+      "id": "formatar-mensagem-status",
+      "name": "Formatar Mensagem Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 600]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.EVOLUTION_API_URL}}/message/sendText/{{$env.EVOLUTION_INSTANCE_NAME}}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "number",
+              "value": "={{$json.telefone}}"
+            },
+            {
+              "name": "text",
+              "value": "={{$json.mensagem}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "enviar-notificacao-status",
+      "name": "Enviar Notificação Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1120, 600],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "3",
+          "name": "Evolution API Header"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"success\": true, \"status\": $json.status } }}",
+        "options": {}
+      },
+      "id": "webhook-response-status",
+      "name": "Webhook Response Status",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1340, 600]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Criar Pedido": {
+      "main": [
+        [
+          {
+            "node": "Processar Dados do Pedido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Processar Dados do Pedido": {
+      "main": [
+        [
+          {
+            "node": "Inserir Pedido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Inserir Pedido": {
+      "main": [
+        [
+          {
+            "node": "Preparar Itens",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Itens": {
+      "main": [
+        [
+          {
+            "node": "Inserir Itens do Pedido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Inserir Itens do Pedido": {
+      "main": [
+        [
+          {
+            "node": "Buscar Pedido Completo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Pedido Completo": {
+      "main": [
+        [
+          {
+            "node": "Formatar Mensagem Confirmação",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatar Mensagem Confirmação": {
+      "main": [
+        [
+          {
+            "node": "Enviar Confirmação WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar Confirmação WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Atualizar Status": {
+      "main": [
+        [
+          {
+            "node": "Atualizar Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Atualizar Status": {
+      "main": [
+        [
+          {
+            "node": "Buscar Dados Cliente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Dados Cliente": {
+      "main": [
+        [
+          {
+            "node": "Formatar Mensagem Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatar Mensagem Status": {
+      "main": [
+        [
+          {
+            "node": "Enviar Notificação Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar Notificação Status": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "2",
+  "id": "2",
+  "meta": {
+    "instanceId": "pizzaria"
+  },
+  "tags": []
+}
