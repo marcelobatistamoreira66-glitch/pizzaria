@@ -1,0 +1,468 @@
+{
+  "name": "🍕 Atendimento IA - WhatsApp",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "webhook-whatsapp",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-whatsapp",
+      "name": "Webhook WhatsApp",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "webhook-whatsapp"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.type}}",
+              "operation": "equals",
+              "value2": "message"
+            }
+          ]
+        }
+      },
+      "id": "filter-messages",
+      "name": "Filtrar Mensagens",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM clientes WHERE telefone = '{{$json.from}}'",
+        "options": {}
+      },
+      "id": "buscar-cliente",
+      "name": "Buscar Cliente",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [680, 200],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{$json.length}}",
+              "operation": "equal",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "id": "cliente-existe",
+      "name": "Cliente Existe?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [900, 200]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "clientes",
+        "columns": "nome, telefone",
+        "values": "={{$json.pushName || 'Cliente'}}, {{$json.from}}",
+        "options": {
+          "returnFields": "*"
+        }
+      },
+      "id": "criar-cliente",
+      "name": "Criar Novo Cliente",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1100, 100],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.*, \n  (SELECT json_agg(row_to_json(p.*)) \n   FROM pedidos p \n   WHERE p.cliente_id = c.id \n   ORDER BY p.created_at DESC \n   LIMIT 5) as historico_pedidos\nFROM clientes c\nWHERE c.telefone = '{{$json.from}}'",
+        "options": {}
+      },
+      "id": "buscar-contexto-cliente",
+      "name": "Buscar Contexto Cliente",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1320, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  c.id, c.nome, c.ordem,\n  json_agg(\n    json_build_object(\n      'id', p.id,\n      'nome', p.nome,\n      'descricao', p.descricao,\n      'preco_p', p.preco_p,\n      'preco_m', p.preco_m,\n      'preco_g', p.preco_g,\n      'preco_gg', p.preco_gg,\n      'preco_unitario', p.preco_unitario,\n      'disponivel', p.disponivel,\n      'vegetariano', p.vegetariano,\n      'vegano', p.vegano,\n      'sem_gluten', p.sem_gluten\n    ) ORDER BY p.nome\n  ) as produtos\nFROM categorias c\nLEFT JOIN produtos p ON p.categoria_id = c.id AND p.disponivel = true\nWHERE c.ativo = true\nGROUP BY c.id, c.nome, c.ordem\nORDER BY c.ordem",
+        "options": {}
+      },
+      "id": "buscar-cardapio",
+      "name": "Buscar Cardápio",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1320, 380]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM configuracoes",
+        "options": {}
+      },
+      "id": "buscar-config",
+      "name": "Buscar Configurações",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1320, 560]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  dia_semana,\n  horario_abertura,\n  horario_fechamento,\n  ativo\nFROM horarios_funcionamento\nORDER BY dia_semana",
+        "options": {}
+      },
+      "id": "buscar-horarios",
+      "name": "Buscar Horários",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1320, 740]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Verificar se está dentro do horário de funcionamento\nconst now = new Date();\nconst diaAtual = now.getDay(); // 0 = domingo\nconst horaAtual = now.toLocaleTimeString('pt-BR', { \n  hour: '2-digit', \n  minute: '2-digit',\n  timeZone: 'America/Sao_Paulo' \n});\n\nconst horarios = $input.all()[3].json; // horarios_funcionamento\nconst horarioHoje = horarios.find(h => h.dia_semana === diaAtual);\n\nlet estaAberto = false;\nlet mensagemHorario = '';\n\nif (horarioHoje && horarioHoje.ativo && horarioHoje.horario_abertura) {\n  const abertura = horarioHoje.horario_abertura;\n  const fechamento = horarioHoje.horario_fechamento;\n  \n  estaAberto = horaAtual >= abertura && horaAtual <= fechamento;\n  mensagemHorario = `Horário: ${abertura} às ${fechamento}`;\n} else {\n  mensagemHorario = 'Hoje estamos fechados';\n}\n\n// Montar dados para IA\nconst dadosCliente = $input.all()[0].json[0] || {};\nconst cardapio = $input.all()[1].json;\nconst configuracoes = $input.all()[2].json;\n\n// Converter configurações em objeto\nconst config = {};\nconfiguracoes.forEach(c => {\n  config[c.chave] = c.valor;\n});\n\n// Buscar últimas conversas para contexto\nconst mensagemAtual = $('Webhook WhatsApp').first().json.body;\nconst telefone = $('Webhook WhatsApp').first().json.from;\nconst nomeCliente = dadosCliente.nome || $('Webhook WhatsApp').first().json.pushName || 'Cliente';\n\nreturn {\n  json: {\n    telefone: telefone,\n    mensagem_usuario: mensagemAtual,\n    cliente: {\n      id: dadosCliente.id,\n      nome: nomeCliente,\n      endereco: dadosCliente.endereco,\n      historico_pedidos: dadosCliente.historico_pedidos || []\n    },\n    cardapio: cardapio,\n    configuracoes: config,\n    horario: {\n      esta_aberto: estaAberto,\n      mensagem: mensagemHorario,\n      dia_semana: diaAtual\n    },\n    timestamp: now.toISOString()\n  }\n};"
+      },
+      "id": "preparar-contexto",
+      "name": "Preparar Contexto para IA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 380]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  mensagem,\n  tipo,\n  ia_resposta,\n  created_at\nFROM conversas\nWHERE telefone = '{{$json.telefone}}'\nORDER BY created_at DESC\nLIMIT 10",
+        "options": {}
+      },
+      "id": "buscar-historico-conversa",
+      "name": "Buscar Histórico Conversa",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1760, 380]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Carregar prompts de IA\nconst fs = require('fs');\nconst promptsPath = '/home/node/src/config/ai-prompts.json';\nlet aiPrompts = {};\n\ntry {\n  const promptsContent = fs.readFileSync(promptsPath, 'utf8');\n  aiPrompts = JSON.parse(promptsContent);\n} catch (error) {\n  console.error('Erro ao carregar prompts:', error);\n  aiPrompts = { system_prompt: { role: 'Você é um atendente de pizzaria.' } };\n}\n\nconst contexto = $input.first().json;\nconst historicoConversa = $input.last().json;\n\n// Montar mensagens para OpenAI\nconst messages = [];\n\n// System prompt\nlet systemPrompt = aiPrompts.system_prompt.role;\nsystemPrompt += '\\n\\n## Personalidade e Estilo:\\n';\nsystemPrompt += aiPrompts.system_prompt.personality.join('\\n');\nsystemPrompt += '\\n\\n## Suas Capacidades:\\n';\nsystemPrompt += aiPrompts.system_prompt.capabilities.join('\\n');\nsystemPrompt += '\\n\\n## Restrições Importantes:\\n';\nsystemPrompt += aiPrompts.system_prompt.restrictions.join('\\n');\nsystemPrompt += '\\n\\n## Regras Anti-Repetição:\\n';\nsystemPrompt += aiPrompts.response_templates.avoid_repetition.rules.join('\\n');\n\nmessages.push({\n  role: 'system',\n  content: systemPrompt\n});\n\n// Contexto atual\nconst contextoInfo = `\n## CONTEXTO ATUAL:\n\n**Pizzaria:** ${contexto.configuracoes.pizzaria_nome}\n**Status:** ${contexto.horario.esta_aberto ? '🟢 ABERTO' : '🔴 FECHADO'}\n**Horário:** ${contexto.horario.mensagem}\n**Taxa Entrega:** R$ ${contexto.configuracoes.taxa_entrega}\n**Tempo Médio:** ${contexto.configuracoes.tempo_medio_entrega} minutos\n\n**Cliente:**\n- Nome: ${contexto.cliente.nome}\n- ID: ${contexto.cliente.id || 'Novo cliente'}\n- Endereço cadastrado: ${contexto.cliente.endereco || 'Não cadastrado'}\n- Total de pedidos anteriores: ${contexto.cliente.historico_pedidos?.length || 0}\n\n**Cardápio Disponível:**\n${JSON.stringify(contexto.cardapio, null, 2)}\n`;\n\nmessages.push({\n  role: 'system',\n  content: contextoInfo\n});\n\n// Histórico de conversa (últimas 5 mensagens)\nif (historicoConversa && historicoConversa.length > 0) {\n  const ultimasMensagens = historicoConversa.slice(0, 5).reverse();\n  \n  ultimasMensagens.forEach(msg => {\n    if (msg.tipo === 'recebida') {\n      messages.push({\n        role: 'user',\n        content: msg.mensagem\n      });\n    } else if (msg.ia_resposta) {\n      messages.push({\n        role: 'assistant',\n        content: msg.ia_resposta\n      });\n    }\n  });\n}\n\n// Mensagem atual do usuário\nmessages.push({\n  role: 'user',\n  content: contexto.mensagem_usuario\n});\n\n// Instruções específicas baseadas no contexto\nlet instructionsContext = '';\n\nif (!contexto.horario.esta_aberto) {\n  instructionsContext = aiPrompts.context_instructions.greeting.after_hours;\n} else if (contexto.cliente.historico_pedidos && contexto.cliente.historico_pedidos.length > 0) {\n  instructionsContext = aiPrompts.context_instructions.greeting.returning_customer;\n}\n\nif (instructionsContext) {\n  messages.push({\n    role: 'system',\n    content: `INSTRUÇÃO CONTEXTUAL: ${instructionsContext}`\n  });\n}\n\nreturn {\n  json: {\n    messages: messages,\n    contexto_original: contexto,\n    max_tokens: 500,\n    temperature: 0.7\n  }\n};"
+      },
+      "id": "montar-prompt-ia",
+      "name": "Montar Prompt para IA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1980, 380]
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "create",
+        "model": "={{$env.AI_MODEL || 'gpt-4o-mini'}}",
+        "messages": "={{$json.messages}}",
+        "options": {
+          "temperature": "={{$json.temperature}}",
+          "maxTokens": "={{$json.max_tokens}}"
+        }
+      },
+      "id": "openai-chat",
+      "name": "OpenAI - Gerar Resposta",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [2200, 380],
+      "credentials": {
+        "openAiApi": {
+          "id": "2",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extrair resposta da IA\nconst iaResponse = $json.choices[0].message.content;\nconst contexto = $('Montar Prompt para IA').first().json.contexto_original;\n\n// Analisar se a IA identificou alguma intenção específica\nlet intencao = 'conversa';\nlet dados_extraidos = {};\n\n// Tentar extrair pedido da resposta (isso seria melhorado com function calling)\nconst respostaLower = iaResponse.toLowerCase();\n\nif (respostaLower.includes('pedido') || respostaLower.includes('confirmar')) {\n  intencao = 'fazer_pedido';\n} else if (respostaLower.includes('cardápio') || respostaLower.includes('menu')) {\n  intencao = 'consultar_cardapio';\n} else if (respostaLower.includes('status') || respostaLower.includes('acompanhar')) {\n  intencao = 'consultar_status';\n}\n\nreturn {\n  json: {\n    telefone: contexto.telefone,\n    resposta_ia: iaResponse,\n    intencao: intencao,\n    dados_extraidos: dados_extraidos,\n    cliente_id: contexto.cliente.id,\n    mensagem_original: contexto.mensagem_usuario,\n    timestamp: new Date().toISOString()\n  }\n};"
+      },
+      "id": "processar-resposta-ia",
+      "name": "Processar Resposta IA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2420, 380]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "conversas",
+        "columns": "cliente_id, telefone, mensagem, tipo, ia_resposta, contexto",
+        "values": "={{$json.cliente_id}}, {{$json.telefone}}, {{$json.mensagem_original}}, recebida, {{$json.resposta_ia}}, {{JSON.stringify($json.dados_extraidos)}}",
+        "options": {}
+      },
+      "id": "salvar-conversa",
+      "name": "Salvar Conversa",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [2640, 380],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL - Pizzaria"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{$env.EVOLUTION_API_URL}}/message/sendText/{{$env.EVOLUTION_INSTANCE_NAME}}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "number",
+              "value": "={{$('Processar Resposta IA').first().json.telefone}}"
+            },
+            {
+              "name": "text",
+              "value": "={{$('Processar Resposta IA').first().json.resposta_ia}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "enviar-whatsapp",
+      "name": "Enviar Resposta WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2860, 380],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "3",
+          "name": "Evolution API Header"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"success\": true, \"message\": \"Mensagem processada\" } }}",
+        "options": {}
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [3080, 380]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Filtrar Mensagens",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtrar Mensagens": {
+      "main": [
+        [
+          {
+            "node": "Buscar Cliente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Cliente": {
+      "main": [
+        [
+          {
+            "node": "Cliente Existe?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cliente Existe?": {
+      "main": [
+        [
+          {
+            "node": "Criar Novo Cliente",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Buscar Contexto Cliente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Criar Novo Cliente": {
+      "main": [
+        [
+          {
+            "node": "Buscar Contexto Cliente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Contexto Cliente": {
+      "main": [
+        [
+          {
+            "node": "Preparar Contexto para IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Cardápio": {
+      "main": [
+        [
+          {
+            "node": "Preparar Contexto para IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Configurações": {
+      "main": [
+        [
+          {
+            "node": "Preparar Contexto para IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Horários": {
+      "main": [
+        [
+          {
+            "node": "Preparar Contexto para IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Contexto para IA": {
+      "main": [
+        [
+          {
+            "node": "Buscar Histórico Conversa",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Histórico Conversa": {
+      "main": [
+        [
+          {
+            "node": "Montar Prompt para IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Prompt para IA": {
+      "main": [
+        [
+          {
+            "node": "OpenAI - Gerar Resposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI - Gerar Resposta": {
+      "main": [
+        [
+          {
+            "node": "Processar Resposta IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Processar Resposta IA": {
+      "main": [
+        [
+          {
+            "node": "Salvar Conversa",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Salvar Conversa": {
+      "main": [
+        [
+          {
+            "node": "Enviar Resposta WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar Resposta WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1",
+  "id": "1",
+  "meta": {
+    "instanceId": "pizzaria"
+  },
+  "tags": []
+}
